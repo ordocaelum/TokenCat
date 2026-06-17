@@ -4,12 +4,15 @@ import asyncio
 from typing import Any, AsyncGenerator
 import httpx
 import tiktoken
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import settings
 from .db import record_usage
 
 proxy_router = APIRouter()
+
+_security_auth = HTTPBearer()
 
 _enc = tiktoken.get_encoding("cl100k_base")
 _content_re = re.compile(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -107,7 +110,12 @@ async def _compress(text: str) -> str:
 
 
 @proxy_router.post("/v1/chat/completions")
-async def chat_completions(request: Request):
+async def chat_completions(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_security_auth),
+):
+    if credentials.credentials != settings.GATEWAY_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized TokenCat Gateway Access")
     payload = await request.json()
     msgs = payload.get("messages", [])
     model = payload.get("model", "unknown")
