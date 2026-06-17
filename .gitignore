@@ -1,0 +1,13 @@
+# Local secrets — never commit
+.env.local
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# HuggingFace cache (if mounted locally)
+.hf_cache/
