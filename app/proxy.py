@@ -160,37 +160,38 @@ async def chat_completions(
 
     async def _gen() -> AsyncGenerator[bytes, None]:
         parts: list[str] = []
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as cl:
-            async with cl.stream(
-                "POST",
-                f"{settings.UPSTREAM_BASE}/v1/chat/completions",
-                json={**payload, "stream": True},
-                headers={
-                    "Authorization": "Bearer " + settings.UPSTREAM_API_KEY,
-                    "Content-Type": "application/json",
-                },
-            ) as resp:
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        yield b"data: [DONE]\n\n"
-                        break
-                    for frag in _content_re.findall(data):
-                        parts.append(_unescape(frag))
-                    yield f"data: {data}\n\n".encode()
-
-        gen_tokens = _count("".join(parts))
-        delta = max(raw_tokens - opt_tokens, 0)
-        await record_usage(
-            model=model,
-            input_raw=raw_tokens,
-            input_opt=opt_tokens,
-            output=gen_tokens,
-            cost_saved=(delta / 1000.0) * rate,
-            orig_prompt=src,
-            opt_prompt=compressed,
-        )
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as cl:
+                async with cl.stream(
+                    "POST",
+                    f"{settings.UPSTREAM_BASE}/v1/chat/completions",
+                    json={**payload, "stream": True},
+                    headers={
+                        "Authorization": "Bearer " + settings.UPSTREAM_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            yield b"data: [DONE]\n\n"
+                            break
+                        for frag in _content_re.findall(data):
+                            parts.append(_unescape(frag))
+                        yield f"data: {data}\n\n".encode()
+        finally:
+            gen_tokens = _count("".join(parts))
+            delta = max(raw_tokens - opt_tokens, 0)
+            await record_usage(
+                model=model,
+                input_raw=raw_tokens,
+                input_opt=opt_tokens,
+                output=gen_tokens,
+                cost_saved=(delta / 1000.0) * rate,
+                orig_prompt=src,
+                opt_prompt=compressed,
+            )
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
