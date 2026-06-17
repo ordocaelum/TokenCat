@@ -1,7 +1,7 @@
 import re
 import json
 import asyncio
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 import httpx
 import tiktoken
 from fastapi import APIRouter, Request
@@ -13,6 +13,58 @@ proxy_router = APIRouter()
 
 _enc = tiktoken.get_encoding("cl100k_base")
 _content_re = re.compile(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_comment_re = re.compile(r"(#[^\n]*|//[^\n]*)")
+_ws_re = re.compile(r"[ \t\r\n]+")
+
+# Bidirectional schema maps: compress standard API keys to single-letter markers
+KEY_MIN: dict[str, str] = {
+    "messages": "M",
+    "model": "m",
+    "content": "c",
+    "role": "r",
+    "system": "s",
+    "user": "u",
+    "assistant": "a",
+    "temperature": "t",
+    "max_tokens": "x",
+    "stream": "S",
+    "functions": "F",
+    "function_call": "f",
+    "tools": "T",
+    "tool_choice": "C",
+    "top_p": "p",
+    "frequency_penalty": "q",
+    "presence_penalty": "P",
+    "stop": "e",
+    "n": "n",
+}
+
+KEY_MAX: dict[str, str] = {v: k for k, v in KEY_MIN.items()}
+
+
+def minify_schema(payload: Any) -> Any:
+    """Recursively compress standard API keys to single-letter markers."""
+    if isinstance(payload, dict):
+        return {KEY_MIN.get(k, k): minify_schema(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [minify_schema(item) for item in payload]
+    return payload
+
+
+def expand_schema(payload: Any) -> Any:
+    """Reverse minified keys back to standard names."""
+    if isinstance(payload, dict):
+        return {KEY_MAX.get(k, k): expand_schema(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [expand_schema(item) for item in payload]
+    return payload
+
+
+def prune_struct(text: str) -> str:
+    """Strip code comments and collapse multi-whitespace/newlines to single spaces."""
+    text = _comment_re.sub("", text)
+    text = _ws_re.sub(" ", text)
+    return text.strip()
 
 
 def _count(text: str) -> int:
@@ -26,7 +78,18 @@ def _unescape(raw: str) -> str:
         return raw.encode().decode("unicode_escape", "ignore")
 
 
+def _model_rate(model: str) -> float:
+    """Return price per 1k tokens for the given model using MODEL_PRICING matrix."""
+    pricing = settings.MODEL_PRICING
+    for prefix, rate in pricing.items():
+        if prefix != "default" and model.startswith(prefix):
+            return rate
+    return pricing.get("default", settings.RATE_PER_1K)
+
+
 async def _compress(text: str) -> str:
+    if _count(text) <= 300:
+        return text
     from llmlingua import PromptCompressor
 
     compressor = PromptCompressor(
@@ -47,19 +110,31 @@ async def _compress(text: str) -> str:
 async def chat_completions(request: Request):
     payload = await request.json()
     msgs = payload.get("messages", [])
+    model = payload.get("model", "unknown")
+
+    # Prune user/system content blocks before semantic compression
+    pruned_msgs = []
+    for m in msgs:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role in ("user", "system") and isinstance(content, str):
+            content = prune_struct(content)
+        pruned_msgs.append({**m, "content": content})
+
     src = "\n".join(
         m.get("content", "")
-        for m in msgs
+        for m in pruned_msgs
         if m.get("content") and isinstance(m.get("content"), str)
     )
     raw_tokens = _count(src)
     compressed = await _compress(src) if src else ""
 
-    if msgs and compressed:
-        msgs[-1]["content"] = compressed
-        payload["messages"] = msgs
+    if pruned_msgs and compressed:
+        pruned_msgs[-1]["content"] = compressed
+        payload["messages"] = pruned_msgs
 
     opt_tokens = _count(compressed)
+    rate = _model_rate(model)
 
     async def _gen() -> AsyncGenerator[bytes, None]:
         parts: list[str] = []
@@ -87,11 +162,11 @@ async def chat_completions(request: Request):
         gen_tokens = _count("".join(parts))
         delta = max(raw_tokens - opt_tokens, 0)
         await record_usage(
-            model=payload.get("model", "unknown"),
+            model=model,
             input_raw=raw_tokens,
             input_opt=opt_tokens,
             output=gen_tokens,
-            cost_saved=(delta / 1000.0) * settings.RATE_PER_1K,
+            cost_saved=(delta / 1000.0) * rate,
             orig_prompt=src,
             opt_prompt=compressed,
         )
