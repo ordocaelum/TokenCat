@@ -1,6 +1,7 @@
 import re
 import json
 import asyncio
+import secrets
 from typing import Any, AsyncGenerator
 import httpx
 import tiktoken
@@ -90,16 +91,29 @@ def _model_rate(model: str) -> float:
     return pricing.get("default", settings.RATE_PER_1K)
 
 
+_compressor = None
+_compressor_lock = asyncio.Lock()
+
+
+async def _get_compressor():
+    global _compressor
+    if _compressor is None:
+        async with _compressor_lock:
+            if _compressor is None:
+                from llmlingua import PromptCompressor
+
+                _compressor = PromptCompressor(
+                    model_name="microsoft/llmlingua-2-xlm-roberta-large-meetingbank",
+                    use_llmlingua2=True,
+                    device_map="cpu",
+                )
+    return _compressor
+
+
 async def _compress(text: str) -> str:
     if _count(text) <= 300:
         return text
-    from llmlingua import PromptCompressor
-
-    compressor = PromptCompressor(
-        model_name="microsoft/llmlingua-2-xlm-roberta-large-meetingbank",
-        use_llmlingua2=True,
-        device_map="cpu",
-    )
+    compressor = await _get_compressor()
     out = await asyncio.to_thread(
         compressor.compress_prompt,
         text,
@@ -114,7 +128,7 @@ async def chat_completions(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(_security_auth),
 ):
-    if credentials.credentials != settings.GATEWAY_TOKEN:
+    if not secrets.compare_digest(credentials.credentials, settings.GATEWAY_TOKEN):
         raise HTTPException(status_code=401, detail="Unauthorized TokenCat Gateway Access")
     payload = await request.json()
     msgs = payload.get("messages", [])
@@ -152,7 +166,7 @@ async def chat_completions(
                 f"{settings.UPSTREAM_BASE}/v1/chat/completions",
                 json={**payload, "stream": True},
                 headers={
-                    "Authorization": request.headers.get("authorization", ""),
+                    "Authorization": "Bearer " + settings.UPSTREAM_API_KEY,
                     "Content-Type": "application/json",
                 },
             ) as resp:
