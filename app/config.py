@@ -16,6 +16,7 @@ class Settings(BaseSettings):
             "default": 0.005,
         }
     )
+    GATEWAY_TOKEN: str = Field(default="tokencat_secret_fallback", alias="TOKENCAT_API_KEY")
 
 
 settings = Settings()
